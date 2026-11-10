@@ -484,6 +484,22 @@ export declare class Model {
   /** Evaluates the workbook */
   evaluate(): void
   /**
+   * Enables incremental recalculation: after an edit, `evaluate` recalculates only the
+   * formulas that depend on the edited cells. Anything that could be unsafe falls back to a
+   * full evaluation, so results are the same either way.
+   */
+  enableIncrementalRecalculation(): void
+  /** Turns incremental recalculation off; evaluation is always full again. */
+  disableIncrementalRecalculation(): void
+  /** Whether incremental recalculation is enabled. */
+  isIncrementalRecalculationEnabled(): boolean
+  /** Discards the dependency records so the next evaluation is a full one. */
+  invalidateDependencyIndex(): void
+  /** Whether the last evaluation used the incremental path. */
+  lastEvaluationWasIncremental(): boolean
+  /** How many formulas the last evaluation ran. */
+  formulasEvaluatedInLastEvaluation(): number
+  /**
    * Sets an input in a cell, parsing it as a user would type it:
    * "3.5" is a number, "Hello" a string, "=A1*2" a formula
    */
@@ -665,6 +681,22 @@ export declare class UserModel {
   resumeEvaluation(): void
   /** Forces an evaluation of the workbook (only needed while paused) */
   evaluate(): void
+  /**
+   * Enables incremental recalculation: after an edit, `evaluate` recalculates only the
+   * formulas that depend on the edited cells. Anything that could be unsafe falls back to a
+   * full evaluation, so results are the same either way.
+   */
+  enableIncrementalRecalculation(): void
+  /** Turns incremental recalculation off; evaluation is always full again. */
+  disableIncrementalRecalculation(): void
+  /** Whether incremental recalculation is enabled. */
+  isIncrementalRecalculationEnabled(): boolean
+  /** Discards the dependency records so the next evaluation is a full one. */
+  invalidateDependencyIndex(): void
+  /** Whether the last evaluation used the incremental path. */
+  lastEvaluationWasIncremental(): boolean
+  /** How many formulas the last evaluation ran. */
+  formulasEvaluatedInLastEvaluation(): number
   /** Returns the name of the workbook */
   getName(): string
   /** Sets the name of the workbook */

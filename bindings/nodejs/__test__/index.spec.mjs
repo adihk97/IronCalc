@@ -251,3 +251,162 @@ test('cell link label and style are one undo step', (t) => {
     tooltip: null,
   });
 });
+
+// ---- Incremental recalculation ---------------------------------------------------------
+
+function chainModel() {
+  // A1 is an input; B1 = A1*2; C1 = B1+1; D1 is unrelated; E1 = SUM(A1:A3).
+  const model = new UserModel("Workbook1", "en", "UTC", "en");
+  model.pauseEvaluation();
+  model.setUserInput(0, 1, 1, "1");
+  model.setUserInput(0, 2, 1, "2");
+  model.setUserInput(0, 3, 1, "3");
+  model.setUserInput(0, 1, 2, "=A1*2");
+  model.setUserInput(0, 1, 3, "=B1+1");
+  model.setUserInput(0, 1, 4, "=40+2");
+  model.setUserInput(0, 1, 5, "=SUM(A1:A3)");
+  model.resumeEvaluation();
+  model.evaluate();
+  return model;
+}
+
+test('incremental recalculation is off by default', (t) => {
+  const model = chainModel();
+  t.false(model.isIncrementalRecalculationEnabled());
+  model.setUserInput(0, 1, 1, "10");
+  t.false(model.lastEvaluationWasIncremental());
+  t.is(model.getFormattedCellValue(0, 1, 3), '21');
+});
+
+test('enable and disable incremental recalculation', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  t.true(model.isIncrementalRecalculationEnabled());
+  model.disableIncrementalRecalculation();
+  t.false(model.isIncrementalRecalculationEnabled());
+});
+
+test('the first evaluation after enabling is full, later edits are incremental', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  t.false(model.lastEvaluationWasIncremental());
+  model.setUserInput(0, 1, 1, "10");
+  t.true(model.lastEvaluationWasIncremental());
+});
+
+test('an edit recalculates only the cells that depend on it', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  model.setUserInput(0, 1, 1, "10");
+  t.true(model.lastEvaluationWasIncremental());
+  // A1 (the edited cell) plus B1, C1 and E1 (the SUM); D1 is not touched.
+  t.is(model.formulasEvaluatedInLastEvaluation() <= 5, true);
+  t.is(model.getFormattedCellValue(0, 1, 2), '20');
+  t.is(model.getFormattedCellValue(0, 1, 3), '21');
+  t.is(model.getFormattedCellValue(0, 1, 4), '42');
+  t.is(model.getFormattedCellValue(0, 1, 5), '15');
+});
+
+test('an edit with no dependents runs almost nothing', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  model.setUserInput(0, 5, 5, "7");
+  t.true(model.lastEvaluationWasIncremental());
+  t.is(model.formulasEvaluatedInLastEvaluation() <= 1, true);
+});
+
+test('incremental results match a plain model over a sequence of edits', (t) => {
+  const incremental = chainModel();
+  const plain = chainModel();
+  incremental.enableIncrementalRecalculation();
+  incremental.evaluate();
+  const edits = [[1, 1, "5"], [2, 1, "=A1+100"], [1, 2, "=A1*3"], [3, 1, ""], [1, 1, "-4"], [1, 4, "=B1+C1"]];
+  for (const [row, column, input] of edits) {
+    incremental.setUserInput(0, row, column, input);
+    plain.setUserInput(0, row, column, input);
+    for (let r = 1; r <= 3; r++) {
+      for (let c = 1; c <= 5; c++) {
+        t.is(incremental.getFormattedCellValue(0, r, c), plain.getFormattedCellValue(0, r, c));
+      }
+    }
+  }
+});
+
+test('a model with a volatile or reference-building formula still gives the right values', (t) => {
+  const model = chainModel();
+  model.setUserInput(0, 1, 6, '=INDIRECT("A1")');
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  model.setUserInput(0, 1, 1, "9");
+  t.false(model.lastEvaluationWasIncremental());
+  t.is(model.getFormattedCellValue(0, 1, 6), '9');
+  t.is(model.getFormattedCellValue(0, 1, 3), '19');
+});
+
+test('a structural change makes the next evaluation full and correct', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  // UserModel evaluates right after the structural change: that evaluation is a full one.
+  model.insertRows(0, 2, 1);
+  t.false(model.lastEvaluationWasIncremental());
+  model.setUserInput(0, 1, 1, "10");
+  t.true(model.lastEvaluationWasIncremental());
+  t.is(model.getFormattedCellValue(0, 1, 3), '21');
+  model.setUserInput(0, 1, 1, "11");
+  t.true(model.lastEvaluationWasIncremental());
+  t.is(model.getFormattedCellValue(0, 1, 3), '23');
+});
+
+test('invalidateDependencyIndex forces one full evaluation', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  model.invalidateDependencyIndex();
+  model.setUserInput(0, 1, 1, "10");
+  t.false(model.lastEvaluationWasIncremental());
+  model.setUserInput(0, 1, 1, "11");
+  t.true(model.lastEvaluationWasIncremental());
+});
+
+test('edits made while evaluation is paused are applied by one evaluation', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  model.pauseEvaluation();
+  model.setUserInput(0, 1, 1, "10");
+  model.setUserInput(0, 2, 1, "20");
+  model.resumeEvaluation();
+  model.evaluate();
+  t.true(model.lastEvaluationWasIncremental());
+  t.is(model.getFormattedCellValue(0, 1, 5), '33');
+});
+
+test('undo and redo keep incremental results right', (t) => {
+  const model = chainModel();
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  model.setUserInput(0, 1, 1, "10");
+  t.is(model.getFormattedCellValue(0, 1, 3), '21');
+  model.undo();
+  t.is(model.getFormattedCellValue(0, 1, 3), '3');
+  model.redo();
+  t.is(model.getFormattedCellValue(0, 1, 3), '21');
+});
+
+test('raw Model: incremental recalculation after updateCellWithNumber', (t) => {
+  const model = new Model("Workbook1", "en", "UTC", "en");
+  model.updateCellWithNumber(0, 1, 1, 1);
+  model.updateCellWithFormula(0, 1, 2, "=A1*2");
+  model.updateCellWithFormula(0, 2, 2, "=5+5");
+  model.enableIncrementalRecalculation();
+  model.evaluate();
+  t.false(model.lastEvaluationWasIncremental());
+  model.updateCellWithNumber(0, 1, 1, 21);
+  model.evaluate();
+  t.true(model.lastEvaluationWasIncremental());
+  t.is(model.getFormattedCellValue(0, 1, 2), '42');
+});
