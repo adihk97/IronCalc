@@ -94,7 +94,12 @@ pub(crate) struct DependencyIndex {
     incomplete: usize,
     cells: HashMap<CellKey, HashSet<CellKey>>,
     // Rectangles are scanned per sheet; an interval structure can replace this later.
-    rectangles: HashMap<u32, Vec<(Read, CellKey)>>,
+    // Keyed by the reading formula, so removing a formula's old record is direct instead of a
+    // scan of every rectangle on the sheet (that scan made a full pass O(formulas squared) on
+    // sheets where every formula holds a range).
+    rectangles: HashMap<u32, HashMap<CellKey, Vec<Read>>>,
+    // Number of rectangle edges per sheet, kept in step with `rectangles`.
+    rectangle_edges: HashMap<u32, usize>,
 }
 
 impl DependencyIndex {
@@ -117,6 +122,7 @@ impl DependencyIndex {
         self.frames.clear();
         self.cells.clear();
         self.rectangles.clear();
+        self.rectangle_edges.clear();
         self.incomplete = 0;
         self.valid = false;
     }
@@ -133,7 +139,7 @@ impl DependencyIndex {
     /// incremental driver uses this to refuse a scan before it becomes larger
     /// than a small, predictable bound.
     pub(crate) fn rectangle_edges_in_sheet(&self, sheet: u32) -> usize {
-        self.rectangles.get(&sheet).map_or(0, Vec::len)
+        self.rectangle_edges.get(&sheet).copied().unwrap_or(0)
     }
     pub(crate) fn reads_are_complete(&self) -> bool {
         self.reads.values().all(|r| r.complete)
@@ -165,9 +171,18 @@ impl DependencyIndex {
                         }
                     }
                     Read::Rect { sheet, .. } => {
-                        if let Some(rectangles) = self.rectangles.get_mut(&sheet) {
-                            rectangles.retain(|(_, formula)| *formula != key);
-                            if rectangles.is_empty() {
+                        // All of this formula's rectangles on the sheet go at once; a second
+                        // rectangle read on the same sheet then finds nothing left to remove.
+                        if let Some(by_formula) = self.rectangles.get_mut(&sheet) {
+                            if let Some(removed) = by_formula.remove(&key) {
+                                if let Some(count) = self.rectangle_edges.get_mut(&sheet) {
+                                    *count = count.saturating_sub(removed.len());
+                                    if *count == 0 {
+                                        self.rectangle_edges.remove(&sheet);
+                                    }
+                                }
+                            }
+                            if by_formula.is_empty() {
                                 self.rectangles.remove(&sheet);
                             }
                         }
@@ -185,21 +200,24 @@ impl DependencyIndex {
             .cloned()
             .unwrap_or_default();
         if let Some(rectangles) = self.rectangles.get(&cell.sheet) {
-            for (read, formula) in rectangles {
-                if let Read::Rect {
-                    row1,
-                    column1,
-                    row2,
-                    column2,
-                    ..
-                } = read
-                {
-                    if *row1 <= cell.row
-                        && cell.row <= *row2
-                        && *column1 <= cell.column
-                        && cell.column <= *column2
+            for (formula, reads) in rectangles {
+                for read in reads {
+                    if let Read::Rect {
+                        row1,
+                        column1,
+                        row2,
+                        column2,
+                        ..
+                    } = read
                     {
-                        result.insert(*formula);
+                        if *row1 <= cell.row
+                            && cell.row <= *row2
+                            && *column1 <= cell.column
+                            && cell.column <= *column2
+                        {
+                            result.insert(*formula);
+                            break;
+                        }
                     }
                 }
             }
@@ -240,7 +258,10 @@ impl DependencyIndex {
                         self.rectangles
                             .entry(*sheet)
                             .or_default()
-                            .push((read.clone(), key));
+                            .entry(key)
+                            .or_default()
+                            .push(read.clone());
+                        *self.rectangle_edges.entry(*sheet).or_insert(0) += 1;
                     }
                 }
             }
@@ -318,7 +339,7 @@ mod reverse_tests {
             index.finish(formula, true);
             assert_eq!(index.reads.len(), 1);
             assert_eq!(index.cells.len(), 1);
-            assert_eq!(index.rectangles.values().map(Vec::len).sum::<usize>(), 1);
+            assert_eq!(index.rectangle_edges.values().sum::<usize>(), 1);
         }
         index.clear();
         assert!(index.cells.is_empty());
