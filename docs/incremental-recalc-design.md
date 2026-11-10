@@ -18,9 +18,25 @@ This describes the checked-out code, not the 0.9.1 benchmark implementation. The
 
 ## Proposed minimal safe design
 
+### Direct workbook mutation
+
+Incremental recalculation is opt-in. `Model::workbook` remains public for
+compatibility, but direct mutation bypasses the model edit hooks. Call
+`Model::invalidate_dependency_index()` after such a mutation; the next
+evaluation will use the full evaluator and rebuild the records.
+
 1. Add non-serialized model-owned index state: invalid, or valid with forward reads per formula and reverse point/rectangle lookup per sheet. Key by sheet, row and column. Capture a formula's own reads while it runs, including empty cells; register each range as one inclusive rectangle in a point-stabbing index, not one edge per member. Instrument every range consumer and optimized bulk path, not just `evaluate_cell`: `evaluate_range_of_numbers` can copy numeric rows directly (`model.rs:1719`). Preserve a full range even if a function exits early or clips it. A formula can be conservatively associated with more inputs than actually read. Index collection must be complete for supported formulas and transactional across unwind/replay and abandoned spill passes; replace old edges only after a successful result. Record reads under the current formula stack frame, not merely the pass root.
 2. Start narrowly: enable the fast path only for a proven subset of scalar formulas and ordinary value/formula edits with complete instrumentation. If coverage is uncertain, if the index is invalid, or if a workbook contains dynamic references, spills, unsupported functions or unclassified volatility, use the existing full evaluation and rebuild a complete index only when safe. Structural/name/sheet/clipboard/merge/history changes invalidate the index and force the next evaluation through the full path. The index must remain invalid until a successful supported rebuild. A formula replacement removes its old outgoing reads and dirties the cell and its dependents; replacing a formula with a constant removes those reads too. Multiple edits while paused accumulate changes.
 3. On edit, query point readers and rectangles containing the changed coordinate, then traverse their dependents transitively with a deduplicated queue. Dirty even when the previous value was empty, an error, or a formula. Mark volatile formulas and their transitive dependents dirty on each recalculation; until classification is complete, use the full path. Explicit `evaluate()` must retain its current recalculation semantics. Do not rely on unchanged intermediate values for pruning in the initial version.
+
+### Incremental work budget
+
+The current rectangle lookup is a flat per-sheet scan. The incremental path
+therefore refuses an edit before scanning a sheet with more than 1,000
+rectangle edges, and also refuses once the dirty set exceeds `max(1,000, 10%`
+of indexed formula records). Both cases run the ordinary full evaluator. These
+are correctness-preserving performance guards until the rectangle index gains
+a sublinear point-stabbing implementation.
 4. Evaluate dirty formulas with the existing demand recursion: a dirty precedent evaluates before its reader; a clean formula returns its cached result. Keep the current in-progress cycle detection and replay depth limit, but scope pass state so clean caches are valid. Rebuild edges after successful evaluation; cycles need tests for both introduction and removal. Any unsupported spill/restart or uncertain state discards the partial incremental attempt and runs the existing full evaluator. Keep conditional-formatting evaluation and dynamic link behavior correct: the full pass clears and rebuilds links (`evaluation.rs:727`), so an incremental pass must preserve clean links and refresh dirty ones, or fall back.
 
 For the stated A..Y/Z/AA workload, this finds Z of the edited row and AA1 without running every Z formula. **It does not make total edit time proportional only to the number of affected formulas:** AA1's existing `SUM` still scans A1:A{rows}. Meeting that stronger goal needs a separate incremental aggregate or range-summary design, including numeric ordering, errors, type changes and floating-point semantics. A rectangle index alone does not provide it. Index construction and any full-workbook survey must also be kept off the steady-state edit path.

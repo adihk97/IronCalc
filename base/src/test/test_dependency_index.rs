@@ -40,6 +40,67 @@ fn dependency_index_direct_cell_reference() {
 }
 
 #[test]
+fn incremental_recalculates_only_dependents() {
+    let mut model = new_empty_model();
+    model._set("A1", "1");
+    model._set("B1", "=A1+1");
+    model._set("C1", "=B1+1");
+    model._set("D1", "=99");
+    model.enable_incremental_recalculation();
+    model.evaluate();
+    assert_eq!(
+        model.last_evaluation_path,
+        crate::model::EvaluationPath::Full
+    );
+    assert!(
+        model.dependency_index.valid,
+        "records: {}",
+        model.dependency_index.reads_len()
+    );
+    model._set("A1", "4");
+    assert_eq!(model.pending_edits.len(), 1);
+    model.evaluate();
+    assert_eq!(
+        model.last_evaluation_path,
+        crate::model::EvaluationPath::Incremental
+    );
+    assert_eq!(model.evaluation.formulas_evaluated, 2);
+    assert_eq!(
+        model.get_cell_value_by_index(0, 1, 3).unwrap(),
+        crate::cell::CellValue::Number(6.0)
+    );
+}
+
+#[test]
+fn incremental_refuses_incomplete_formula_records() {
+    for formula in [
+        "=INDIRECT(\"A1\")",
+        "=OFFSET(A1,0,0)",
+        "=NOW()",
+        "=TODAY()",
+        "=RAND()",
+        "=RANDBETWEEN(1,2)",
+        "=RANDARRAY(1,1)",
+        "=ISFORMULA(A1)",
+        "=SUBTOTAL(9,A1:A2)",
+    ] {
+        let mut model = new_empty_model();
+        model._set("A1", "1");
+        model._set("B1", formula);
+        model.enable_incremental_recalculation();
+        model.evaluate();
+        assert!(model.dependency_index.incomplete_count() > 0, "{formula}");
+        model._set("A1", "2");
+        model.evaluate();
+        assert_eq!(
+            model.last_evaluation_path,
+            crate::model::EvaluationPath::Full,
+            "{formula}"
+        );
+    }
+}
+
+#[test]
 fn dependency_index_empty_and_plain_value_cells() {
     let mut model = new_empty_model();
     model._set("B1", "=A1");

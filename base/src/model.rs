@@ -343,6 +343,9 @@ pub struct Model<'a> {
     pub(crate) evaluation: Evaluation,
     /// Runtime-only formula input records. This is deliberately not serialized.
     pub(crate) dependency_index: DependencyIndex,
+    pub(crate) incremental_recalculation: bool,
+    pub(crate) pending_edits: Vec<CellReferenceIndex>,
+    pub(crate) last_evaluation_path: EvaluationPath,
     /// Evaluated CF results per cell, keyed by (sheet_index, row, column).
     /// Rebuilt from scratch on every call to evaluate_conditional_formatting().
     pub(crate) cf_cache: HashMap<(u32, i32, i32), Vec<CfCellResult>>,
@@ -354,6 +357,12 @@ pub struct Model<'a> {
     /// (`parse_formulas`), extended when a formula is added. See
     /// `shared_formula_index`.
     pub(crate) shared_formula_lookup: Vec<SharedFormulaLookup>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvaluationPath {
+    Full,
+    Incremental,
 }
 
 /// Formula text to index in `Worksheet::shared_formulas`, for one sheet.
@@ -393,6 +402,32 @@ pub struct CellIndex {
 }
 
 impl<'a> Model<'a> {
+    /// Enables opt-in incremental recalculation. Direct mutation through `workbook`
+    /// must be followed by [`Model::invalidate_dependency_index`].
+    #[allow(dead_code)] // crate-private API is exercised by incremental tests
+    pub(crate) fn enable_incremental_recalculation(&mut self) {
+        self.incremental_recalculation = true;
+        self.dependency_index.enable();
+    }
+
+    #[allow(dead_code)] // crate-private API is exercised by incremental tests
+    pub(crate) fn disable_incremental_recalculation(&mut self) {
+        self.incremental_recalculation = false;
+        self.dependency_index.disable();
+        self.pending_edits.clear();
+    }
+
+    /// Invalidates dependency records after directly mutating [`Model::workbook`].
+    pub fn invalidate_dependency_index(&mut self) {
+        self.dependency_index.invalidate();
+    }
+
+    pub(crate) fn note_cell_edit(&mut self, sheet: u32, row: i32, column: i32) {
+        if self.incremental_recalculation {
+            self.pending_edits
+                .push(CellReferenceIndex { sheet, row, column });
+        }
+    }
     #[allow(dead_code)] // used by tests now; the next stage uses it in evaluation
     pub(crate) fn enable_dependency_index(&mut self) {
         self.dependency_index.enable();
@@ -2026,6 +2061,9 @@ impl<'a> Model<'a> {
             last_lambda_id: 0,
             evaluation: Evaluation::default(),
             dependency_index: DependencyIndex::default(),
+            incremental_recalculation: false,
+            pending_edits: Vec::new(),
+            last_evaluation_path: EvaluationPath::Full,
             cf_cache: HashMap::new(),
             links: HashMap::new(),
         };
@@ -2683,6 +2721,7 @@ impl<'a> Model<'a> {
     ) -> Result<(), String> {
         // first we make sure we can write in the cell and clear the spills.
         self.prepare_cell_for_user_input(sheet, row, column)?;
+        self.note_cell_edit(sheet, row, column);
         if value.is_empty() {
             // If the value is empty we just clear the cell.
             // Deleting the contents of a cell also removes its link.
@@ -2796,6 +2835,7 @@ impl<'a> Model<'a> {
         height: i32,
         value: &str,
     ) -> Result<(), String> {
+        self.invalidate_dependency_index();
         if self
             .workbook
             .worksheet(sheet)?
@@ -2973,6 +3013,7 @@ impl<'a> Model<'a> {
         formula: &str,
         style: i32,
     ) -> Result<i32, String> {
+        self.note_cell_edit(sheet, row, column);
         self.dependency_index
             .remove(CellReferenceIndex { sheet, row, column });
         let worksheet = self.workbook.worksheet_mut(sheet)?;
@@ -2993,6 +3034,10 @@ impl<'a> Model<'a> {
         }
         let static_result = run_static_analysis_on_node(&parsed_formula);
         let is_dynamic = !matches!(static_result, StaticResult::Scalar);
+
+        if is_dynamic {
+            self.invalidate_dependency_index();
+        }
 
         let formula_index = self.shared_formula_index(sheet, parsed_formula, static_result)?;
         let worksheet = self.workbook.worksheet_mut(sheet)?;
@@ -3048,6 +3093,7 @@ impl<'a> Model<'a> {
         value: &str,
         style: i32,
     ) -> Result<(), String> {
+        self.note_cell_edit(sheet, row, column);
         self.dependency_index
             .remove(CellReferenceIndex { sheet, row, column });
         match self.shared_strings.get(value) {
@@ -3082,6 +3128,7 @@ impl<'a> Model<'a> {
         value: bool,
         style: i32,
     ) -> Result<(), String> {
+        self.note_cell_edit(sheet, row, column);
         self.dependency_index
             .remove(CellReferenceIndex { sheet, row, column });
         self.workbook
@@ -3097,6 +3144,7 @@ impl<'a> Model<'a> {
         value: f64,
         style: i32,
     ) -> Result<(), String> {
+        self.note_cell_edit(sheet, row, column);
         self.dependency_index
             .remove(CellReferenceIndex { sheet, row, column });
         self.workbook
@@ -3371,6 +3419,7 @@ impl<'a> Model<'a> {
     /// # }
     /// ```
     pub fn range_clear_contents(&mut self, range: &Area) -> Result<(), String> {
+        self.invalidate_dependency_index();
         if !self.can_clear_range(range)? {
             return Err("Cannot clear the range because it contains array formulas".to_string());
         }
@@ -3473,6 +3522,7 @@ impl<'a> Model<'a> {
     /// # Ok(())
     /// # }
     pub fn range_clear_all(&mut self, area: &Area) -> Result<(), String> {
+        self.invalidate_dependency_index();
         if !self.can_clear_range(area)? {
             return Err("Cannot clear the range because it contains array formulas".to_string());
         }
@@ -3787,6 +3837,7 @@ impl<'a> Model<'a> {
     /// Adds a new defined name. See [`DefinedNameEntry`] for the meaning of
     /// the fields.
     pub fn new_defined_name(&mut self, entry: DefinedNameEntry) -> Result<(), String> {
+        self.invalidate_dependency_index();
         let DefinedNameEntry {
             name,
             scope,
@@ -3896,6 +3947,7 @@ impl<'a> Model<'a> {
 
     /// Delete defined name of name and scope
     pub fn delete_defined_name(&mut self, name: &str, scope: Option<u32>) -> Result<(), String> {
+        self.invalidate_dependency_index();
         let name_upper = name.to_uppercase();
         let defined_names = &self.workbook.defined_names;
         let sheet_id = match scope {
@@ -3925,6 +3977,7 @@ impl<'a> Model<'a> {
         scope: Option<u32>,
         new: DefinedNameEntry,
     ) -> Result<(), String> {
+        self.invalidate_dependency_index();
         let new_name = &new.name;
         let new_scope = new.scope;
         let new_formula = &new.formula;
@@ -4089,6 +4142,7 @@ impl<'a> Model<'a> {
         self.parser.set_locale(locale);
         self.locale = locale;
         self.workbook.settings.locale = locale_id.to_string();
+        self.invalidate_dependency_index();
         self.evaluate();
         Ok(())
     }
@@ -4101,6 +4155,7 @@ impl<'a> Model<'a> {
         };
         self.tz = tz;
         self.workbook.settings.tz = timezone.to_string();
+        self.invalidate_dependency_index();
         self.evaluate();
         Ok(())
     }
@@ -4113,6 +4168,7 @@ impl<'a> Model<'a> {
         };
         self.parser.set_language(language);
         self.language = language;
+        self.invalidate_dependency_index();
         Ok(())
     }
 
