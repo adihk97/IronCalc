@@ -79,7 +79,13 @@ impl<'a> Model<'a> {
     }
 
     // FIXME(TD): This is too much
-    fn cell_is_subtotal(&self, sheet_index: u32, row: i32, column: i32) -> bool {
+    fn cell_is_subtotal(&mut self, sheet_index: u32, row: i32, column: i32) -> bool {
+        self.dependency_index.record_cell(CellReferenceIndex {
+            sheet: sheet_index,
+            row,
+            column,
+        });
+        self.dependency_index.mark_incomplete();
         let cell = match self.workbook.worksheets[sheet_index as usize].cell(row, column) {
             Some(c) => c,
             None => {

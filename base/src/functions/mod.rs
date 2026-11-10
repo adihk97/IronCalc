@@ -2316,6 +2316,22 @@ impl<'a> Model<'a> {
         args: &[Node],
         cell: CellReferenceIndex,
     ) -> CalcResult {
+        // The variants below were found by reviewing this module's `Function`
+        // enum, its parser-name table, and this dispatch table. They either
+        // create a reference from values or are volatile, so executed reads
+        // alone cannot make a complete dependency record.
+        if matches!(
+            kind,
+            Function::Indirect
+                | Function::Offset
+                | Function::Now
+                | Function::Today
+                | Function::Rand
+                | Function::Randbetween
+                | Function::Randarray
+        ) {
+            self.dependency_index.mark_incomplete();
+        }
         match kind {
             Function::And => self.fn_and(args, cell),
             Function::False => self.fn_false(args, cell),
