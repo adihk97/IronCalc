@@ -39,6 +39,7 @@ use crate::{
     utils as common,
 };
 
+use crate::dependency_index::{DependencyIndex, FormulaReads};
 use crate::evaluation::{CellKey, Evaluation, FormulaCell, Seen};
 use crate::{cf_types::CfCellResult, tz::Tz};
 
@@ -340,6 +341,8 @@ pub struct Model<'a> {
     pub(crate) last_lambda_id: usize,
     /// Everything the evaluation algorithm needs besides the workbook. See `evaluation.rs`.
     pub(crate) evaluation: Evaluation,
+    /// Runtime-only formula input records. This is deliberately not serialized.
+    pub(crate) dependency_index: DependencyIndex,
     /// Evaluated CF results per cell, keyed by (sheet_index, row, column).
     /// Rebuilt from scratch on every call to evaluate_conditional_formatting().
     pub(crate) cf_cache: HashMap<(u32, i32, i32), Vec<CfCellResult>>,
@@ -390,6 +393,27 @@ pub struct CellIndex {
 }
 
 impl<'a> Model<'a> {
+    #[allow(dead_code)] // used by tests now; the next stage uses it in evaluation
+    pub(crate) fn enable_dependency_index(&mut self) {
+        self.dependency_index.enable();
+    }
+
+    #[allow(dead_code)] // used by tests now; the next stage uses it in evaluation
+    pub(crate) fn disable_dependency_index(&mut self) {
+        self.dependency_index.disable();
+    }
+
+    #[allow(dead_code)] // used by tests now; the next stage uses it in evaluation
+    pub(crate) fn clear_dependency_index(&mut self) {
+        self.dependency_index.clear();
+    }
+
+    #[allow(dead_code)] // used by tests now; the next stage uses it in evaluation
+    pub(crate) fn formula_reads(&self, sheet: u32, row: i32, column: i32) -> Option<&FormulaReads> {
+        self.dependency_index
+            .formula_reads(CellReferenceIndex { sheet, row, column })
+    }
+
     pub(crate) fn get_next_variable_id(&mut self) -> usize {
         let id = self.last_variable_id;
         self.last_variable_id += 1;
@@ -471,19 +495,19 @@ impl<'a> Model<'a> {
                 if !absolute_column2 {
                     column_right += cell.column;
                 }
+                let left = CellReferenceIndex {
+                    sheet: *sheet_index,
+                    row: row_left.min(row_right),
+                    column: column_left.min(column_right),
+                };
+                let right = CellReferenceIndex {
+                    sheet: *sheet_index,
+                    row: row_left.max(row_right),
+                    column: column_left.max(column_right),
+                };
+                self.dependency_index.record_rect(left, right);
                 // FIXME: HACK. The parser is currently parsing Sheet3!A1:A10 as Sheet3!A1:(present sheet)!A10
-                CalcResult::Range {
-                    left: CellReferenceIndex {
-                        sheet: *sheet_index,
-                        row: row_left,
-                        column: column_left,
-                    },
-                    right: CellReferenceIndex {
-                        sheet: *sheet_index,
-                        row: row_right,
-                        column: column_right,
-                    },
-                }
+                CalcResult::Range { left, right }
             }
             Node::ImplicitIntersection {
                 automatic: _,
@@ -518,6 +542,7 @@ impl<'a> Model<'a> {
                             };
                         }
                         ParsedDefinedName::RangeReference(range) => {
+                            self.dependency_index.record_rect(range.left, range.right);
                             return CalcResult::Range {
                                 left: range.left,
                                 right: range.right,
@@ -855,18 +880,18 @@ impl<'a> Model<'a> {
                 } else {
                     *column2 + cell.column
                 };
-                CalcResult::Range {
-                    left: CellReferenceIndex {
-                        sheet: *sheet_index,
-                        row: r1.min(r2),
-                        column: c1.min(c2),
-                    },
-                    right: CellReferenceIndex {
-                        sheet: *sheet_index,
-                        row: r1.max(r2),
-                        column: c1.max(c2),
-                    },
-                }
+                let left = CellReferenceIndex {
+                    sheet: *sheet_index,
+                    row: r1.min(r2),
+                    column: c1.min(c2),
+                };
+                let right = CellReferenceIndex {
+                    sheet: *sheet_index,
+                    row: r1.max(r2),
+                    column: c1.max(c2),
+                };
+                self.dependency_index.record_rect(left, right);
+                CalcResult::Range { left, right }
             }
             OpConcatenateKind { left, right } => self.handle_concatenate(left, right, cell),
             OpProductKind { kind, left, right } => match kind {
@@ -931,7 +956,10 @@ impl<'a> Model<'a> {
                             self.evaluate_cell(reference)
                         }
                         ParsedDefinedName::RangeReference(range) => CalcResult::Range {
-                            left: range.left,
+                            left: {
+                                self.dependency_index.record_rect(range.left, range.right);
+                                range.left
+                            },
                             right: range.right,
                         },
                         ParsedDefinedName::LambdaDefinition(param_names, body) => {
@@ -996,6 +1024,7 @@ impl<'a> Model<'a> {
                     // The spill range depends on the *shape* of the anchor, which is
                     // only known once the anchor has been evaluated. Evaluating it here
                     // also records the dependency in `readers`.
+                    self.dependency_index.record_cell(left);
                     if let CalcResult::Error {
                         error: Error::CIRC, ..
                     } = self.evaluate_cell(left)
@@ -1383,6 +1412,10 @@ impl<'a> Model<'a> {
         style: i32,
         array: &[Vec<ArrayNode>],
     ) -> Result<Option<CalcResult>, String> {
+        // Spill placement inspects occupied cells directly below. Its result
+        // can change when one of those cells changes, but this stage does not
+        // retain those individual reads.
+        self.dependency_index.mark_incomplete();
         let CellReferenceIndex { sheet, row, column } = anchor;
         let height = array.len() as i32;
         let width = array[0].len() as i32;
@@ -1694,6 +1727,9 @@ impl<'a> Model<'a> {
         left: CellReferenceIndex,
         right: CellReferenceIndex,
     ) -> Vec<Vec<ArrayNode>> {
+        // `left` and `right` come from the formula before consumers clip a
+        // whole row or column to the sheet's used area.
+        self.dependency_index.record_rect(left, right);
         let width = (right.column - left.column + 1).max(0) as usize;
         let height = (right.row - left.row + 1).max(0) as usize;
         let mut result = Vec::with_capacity(height);
@@ -1721,6 +1757,9 @@ impl<'a> Model<'a> {
         left: CellReferenceIndex,
         right: CellReferenceIndex,
     ) -> Option<Vec<f64>> {
+        // This path can copy numeric rows directly from sheet data, so it
+        // must record the range before doing so.
+        self.dependency_index.record_rect(left, right);
         let width = (right.column - left.column + 1).max(0) as usize;
         let height = (right.row - left.row + 1).max(0) as usize;
         let mut numbers = Vec::with_capacity(width * height);
@@ -1986,6 +2025,7 @@ impl<'a> Model<'a> {
             lambdas: HashMap::new(),
             last_lambda_id: 0,
             evaluation: Evaluation::default(),
+            dependency_index: DependencyIndex::default(),
             cf_cache: HashMap::new(),
             links: HashMap::new(),
         };
@@ -2646,6 +2686,8 @@ impl<'a> Model<'a> {
         if value.is_empty() {
             // If the value is empty we just clear the cell.
             // Deleting the contents of a cell also removes its link.
+            self.dependency_index
+                .remove(CellReferenceIndex { sheet, row, column });
             let ws = self.workbook.worksheet_mut(sheet)?;
             ws.cell_clear_contents(row, column)?;
             ws.links.remove(&(row, column));
@@ -2708,18 +2750,24 @@ impl<'a> Model<'a> {
                                 .get_style_with_format(new_style_index, &num_fmt)?;
                         }
                     }
+                    self.dependency_index
+                        .remove(CellReferenceIndex { sheet, row, column });
                     let worksheet = self.workbook.worksheet_mut(sheet)?;
                     worksheet.set_cell_with_number(row, column, v, new_style_index)?;
                     return Ok(());
                 }
                 // We try to parse as boolean
                 if let Ok(v) = value.to_lowercase().parse::<bool>() {
+                    self.dependency_index
+                        .remove(CellReferenceIndex { sheet, row, column });
                     let worksheet = self.workbook.worksheet_mut(sheet)?;
                     worksheet.set_cell_with_boolean(row, column, v, new_style_index)?;
                     return Ok(());
                 }
                 // Check is it is error value
                 let upper = value.to_uppercase();
+                self.dependency_index
+                    .remove(CellReferenceIndex { sheet, row, column });
                 let worksheet = self.workbook.worksheet_mut(sheet)?;
                 match get_error_by_name(&upper, self.language) {
                     Some(error) => {
@@ -2925,6 +2973,8 @@ impl<'a> Model<'a> {
         formula: &str,
         style: i32,
     ) -> Result<i32, String> {
+        self.dependency_index
+            .remove(CellReferenceIndex { sheet, row, column });
         let worksheet = self.workbook.worksheet_mut(sheet)?;
         let cell_reference = CellReferenceRC {
             sheet: worksheet.get_name(),
@@ -2998,6 +3048,8 @@ impl<'a> Model<'a> {
         value: &str,
         style: i32,
     ) -> Result<(), String> {
+        self.dependency_index
+            .remove(CellReferenceIndex { sheet, row, column });
         match self.shared_strings.get(value) {
             Some(string_index) => {
                 self.workbook.worksheet_mut(sheet)?.set_cell_with_string(
@@ -3030,6 +3082,8 @@ impl<'a> Model<'a> {
         value: bool,
         style: i32,
     ) -> Result<(), String> {
+        self.dependency_index
+            .remove(CellReferenceIndex { sheet, row, column });
         self.workbook
             .worksheet_mut(sheet)?
             .set_cell_with_boolean(row, column, value, style)
@@ -3043,6 +3097,8 @@ impl<'a> Model<'a> {
         value: f64,
         style: i32,
     ) -> Result<(), String> {
+        self.dependency_index
+            .remove(CellReferenceIndex { sheet, row, column });
         self.workbook
             .worksheet_mut(sheet)?
             .set_cell_with_number(row, column, value, style)

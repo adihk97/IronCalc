@@ -754,6 +754,9 @@ impl<'a> Model<'a> {
             // on record: a read that was not made is nobody's dependency.
             return CalcResult::EmptyCell;
         }
+        // Do this before a referenced formula gets its own frame. The caller
+        // read this cell, not the formula's transitive inputs.
+        self.dependency_index.record_cell(cell_reference);
         // The cell is looked at, not cloned: what is needed of it is copied
         // out, and the sheet is free again before anything else is evaluated.
         enum Found {
@@ -938,6 +941,10 @@ impl<'a> Model<'a> {
     /// A read that closes a loop through it is then still a cycle.
     fn run_top(&mut self, cell_reference: CellReferenceIndex, cell: FormulaCell) -> CalcResult {
         let key = key(cell_reference);
+        // A frame belongs to this invocation, rather than the pass root. A
+        // recursive formula has its own frame; its caller records only the
+        // read of this cell before entering here.
+        self.dependency_index.push();
         // A formula can attach a link to its cell as it runs (HYPERLINK). A
         // run that was abandoned to an unwind may have attached one on the
         // strength of values it never really read; this run decides afresh.
@@ -952,10 +959,15 @@ impl<'a> Model<'a> {
         };
         self.evaluation.depth -= 1;
         if self.evaluation.unwinding {
+            self.dependency_index.finish(cell_reference, false);
             return CalcResult::EmptyCell;
         }
         // The cell may have been found on a cycle while it ran.
         let result = if self.evaluation.circular.contains(&key) {
+            // The result is a circular-reference error whatever the inputs are,
+            // so the reads recorded for this run say nothing about when the
+            // result could change once the cycle is broken.
+            self.dependency_index.mark_incomplete();
             circular_reference(cell_reference)
         } else {
             result
@@ -968,18 +980,22 @@ impl<'a> Model<'a> {
         };
         self.evaluation.stack.pop();
         if let Err(message) = stored {
+            self.dependency_index.finish(cell_reference, false);
             // Not expected to happen; keep the cell from being evaluated again.
             self.evaluation.cells.insert(key, CellState::Evaluated);
             return CalcResult::new_error(Error::ERROR, cell_reference, message);
         }
         if self.evaluation.restart.is_some() {
+            self.dependency_index.finish(cell_reference, false);
             return CalcResult::EmptyCell;
         }
         self.evaluation.cells.insert(key, CellState::Evaluated);
         // Return what was stored, so that a dependent evaluated in this pass
         // sees the same value it would read from the sheet later: the first
         // element of a spilled array, or the error the result was turned into.
-        self.stored_value(cell_reference)
+        let result = self.stored_value(cell_reference);
+        self.dependency_index.finish(cell_reference, true);
+        result
     }
 
     /// Runs the parsed formula and turns a reference into a value or an array.
