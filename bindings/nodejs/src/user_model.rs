@@ -161,6 +161,44 @@ impl UserModel {
     self.model.evaluate();
   }
 
+  /// Enables incremental recalculation: after an edit, `evaluate` recalculates only the
+  /// formulas that depend on the edited cells. Anything that could be unsafe falls back to a
+  /// full evaluation, so results are the same either way.
+  #[napi]
+  pub fn enable_incremental_recalculation(&mut self) {
+    self.model.enable_incremental_recalculation()
+  }
+
+  /// Turns incremental recalculation off; evaluation is always full again.
+  #[napi]
+  pub fn disable_incremental_recalculation(&mut self) {
+    self.model.disable_incremental_recalculation()
+  }
+
+  /// Whether incremental recalculation is enabled.
+  #[napi]
+  pub fn is_incremental_recalculation_enabled(&self) -> bool {
+    self.model.is_incremental_recalculation_enabled()
+  }
+
+  /// Discards the dependency records so the next evaluation is a full one.
+  #[napi]
+  pub fn invalidate_dependency_index(&mut self) {
+    self.model.invalidate_dependency_index()
+  }
+
+  /// Whether the last evaluation used the incremental path.
+  #[napi]
+  pub fn last_evaluation_was_incremental(&self) -> bool {
+    self.model.last_evaluation_was_incremental()
+  }
+
+  /// How many formulas the last evaluation ran.
+  #[napi]
+  pub fn formulas_evaluated_in_last_evaluation(&self) -> u32 {
+    self.model.formulas_evaluated_in_last_evaluation() as u32
+  }
+
   // Workbook properties
 
   /// Returns the name of the workbook

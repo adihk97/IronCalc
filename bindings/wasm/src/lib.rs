@@ -207,6 +207,36 @@ impl Model {
         self.model.evaluate();
     }
 
+    #[wasm_bindgen(js_name = "enableIncrementalRecalculation")]
+    pub fn enable_incremental_recalculation(&mut self) {
+        self.model.enable_incremental_recalculation()
+    }
+
+    #[wasm_bindgen(js_name = "disableIncrementalRecalculation")]
+    pub fn disable_incremental_recalculation(&mut self) {
+        self.model.disable_incremental_recalculation()
+    }
+
+    #[wasm_bindgen(js_name = "isIncrementalRecalculationEnabled")]
+    pub fn is_incremental_recalculation_enabled(&self) -> bool {
+        self.model.is_incremental_recalculation_enabled()
+    }
+
+    #[wasm_bindgen(js_name = "invalidateDependencyIndex")]
+    pub fn invalidate_dependency_index(&mut self) {
+        self.model.invalidate_dependency_index()
+    }
+
+    #[wasm_bindgen(js_name = "lastEvaluationWasIncremental")]
+    pub fn last_evaluation_was_incremental(&self) -> bool {
+        self.model.last_evaluation_was_incremental()
+    }
+
+    #[wasm_bindgen(js_name = "formulasEvaluatedInLastEvaluation")]
+    pub fn formulas_evaluated_in_last_evaluation(&self) -> u32 {
+        self.model.formulas_evaluated_in_last_evaluation() as u32
+    }
+
     #[wasm_bindgen(js_name = "flushSendQueue")]
     pub fn flush_send_queue(&mut self) -> Vec<u8> {
         self.model.flush_send_queue()

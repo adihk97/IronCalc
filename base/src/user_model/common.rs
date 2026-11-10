@@ -397,6 +397,38 @@ impl<'a> UserModel<'a> {
         self.model.evaluate()
     }
 
+    /// Enables incremental recalculation: after an edit, evaluation recalculates only the
+    /// formulas that depend on the edited cells, and falls back to a full evaluation whenever
+    /// that could be unsafe. See [Model::enable_incremental_recalculation].
+    pub fn enable_incremental_recalculation(&mut self) {
+        self.model.enable_incremental_recalculation()
+    }
+
+    /// Turns incremental recalculation off; evaluation is always full again.
+    pub fn disable_incremental_recalculation(&mut self) {
+        self.model.disable_incremental_recalculation()
+    }
+
+    /// Whether incremental recalculation is enabled.
+    pub fn is_incremental_recalculation_enabled(&self) -> bool {
+        self.model.is_incremental_recalculation_enabled()
+    }
+
+    /// Discards the dependency records, so the next evaluation is a full one.
+    pub fn invalidate_dependency_index(&mut self) {
+        self.model.invalidate_dependency_index()
+    }
+
+    /// Whether the last evaluation used the incremental path.
+    pub fn last_evaluation_was_incremental(&self) -> bool {
+        self.model.last_evaluation_was_incremental()
+    }
+
+    /// How many formulas the last evaluation ran.
+    pub fn formulas_evaluated_in_last_evaluation(&self) -> usize {
+        self.model.formulas_evaluated_in_last_evaluation()
+    }
+
     /// Returns the list of pending diffs and removes them from the queue
     ///
     /// This is used together with [apply_external_diffs](UserModel::apply_external_diffs) to keep two remote models

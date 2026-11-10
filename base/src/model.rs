@@ -402,19 +402,37 @@ pub struct CellIndex {
 }
 
 impl<'a> Model<'a> {
-    /// Enables opt-in incremental recalculation. Direct mutation through `workbook`
-    /// must be followed by [`Model::invalidate_dependency_index`].
-    #[allow(dead_code)] // crate-private API is exercised by incremental tests
-    pub(crate) fn enable_incremental_recalculation(&mut self) {
+    /// Enables opt-in incremental recalculation. After an edit, [`Model::evaluate`] then
+    /// recalculates only the formulas that depend on the edited cells, and falls back to a
+    /// full evaluation whenever that could be unsafe (see `docs/incremental-recalc-design.md`).
+    /// Direct mutation through `workbook` must be followed by
+    /// [`Model::invalidate_dependency_index`].
+    pub fn enable_incremental_recalculation(&mut self) {
         self.incremental_recalculation = true;
         self.dependency_index.enable();
     }
 
-    #[allow(dead_code)] // crate-private API is exercised by incremental tests
-    pub(crate) fn disable_incremental_recalculation(&mut self) {
+    /// Turns incremental recalculation off and drops its records; evaluation is always full.
+    pub fn disable_incremental_recalculation(&mut self) {
         self.incremental_recalculation = false;
         self.dependency_index.disable();
         self.pending_edits.clear();
+    }
+
+    /// Whether incremental recalculation is enabled.
+    pub fn is_incremental_recalculation_enabled(&self) -> bool {
+        self.incremental_recalculation
+    }
+
+    /// Whether the last call to [`Model::evaluate`] used the incremental path (it recalculated
+    /// only dependents) rather than a full evaluation.
+    pub fn last_evaluation_was_incremental(&self) -> bool {
+        matches!(self.last_evaluation_path, EvaluationPath::Incremental)
+    }
+
+    /// How many formulas the last call to [`Model::evaluate`] ran.
+    pub fn formulas_evaluated_in_last_evaluation(&self) -> usize {
+        self.evaluation.formulas_evaluated
     }
 
     /// Invalidates dependency records after directly mutating [`Model::workbook`].
