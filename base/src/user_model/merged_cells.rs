@@ -57,6 +57,7 @@ impl UserModel<'_> {
     // Merges every range of `ranges` (all on the same sheet), centering each
     // horizontally when `center` is set, as a single undo step.
     fn merge_ranges(&mut self, ranges: &[Area], center: bool) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let Some(first) = ranges.first() else {
             return Ok(());
         };
@@ -214,6 +215,7 @@ impl UserModel<'_> {
     /// See also:
     /// * [Model::unmerge_cells](crate::Model::unmerge_cells)
     pub fn unmerge_cells(&mut self, range: &Area) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let sheet = range.sheet;
         let old_value = self.model.get_merged_cells(sheet)?.to_vec();
         self.model.unmerge_cells(range)?;

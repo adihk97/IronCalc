@@ -207,6 +207,7 @@ impl<'a> Model<'a> {
 
     /// Adds a sheet with a automatically generated name
     pub fn new_sheet(&mut self) -> (String, u32) {
+        self.invalidate_dependency_index();
         // First we find a name
         let base_name = self.get_sheet_name();
         let base_name_uppercase = base_name.to_uppercase();
@@ -238,6 +239,7 @@ impl<'a> Model<'a> {
         sheet_index: u32,
         sheet_id: Option<u32>,
     ) -> Result<(), String> {
+        self.invalidate_dependency_index();
         if !is_valid_sheet_name(sheet_name) {
             return Err(format!("Invalid name for a sheet: '{sheet_name}'"));
         }
@@ -294,6 +296,7 @@ impl<'a> Model<'a> {
     ///
     /// Fails if `source_index` is out of range.
     pub fn duplicate_sheet(&mut self, source_index: u32) -> Result<(String, u32), String> {
+        self.invalidate_dependency_index();
         // Validate the source and capture what we need before mutating anything.
         let source = self.workbook.worksheet(source_index)?;
         let source_name = source.get_name();
@@ -461,6 +464,7 @@ impl<'a> Model<'a> {
         sheet_index: u32,
         new_name: &str,
     ) -> Result<(), String> {
+        self.invalidate_dependency_index();
         if !is_valid_sheet_name(new_name) {
             return Err(format!("Invalid name for a sheet: '{new_name}'."));
         }
@@ -527,6 +531,7 @@ impl<'a> Model<'a> {
     ///   * The sheet does not exists
     ///   * It is the last sheet
     pub fn delete_sheet(&mut self, sheet_index: u32) -> Result<(), String> {
+        self.invalidate_dependency_index();
         let worksheets = &self.workbook.worksheets;
         let sheet_count = worksheets.len() as u32;
         if sheet_count == 1 {
@@ -551,6 +556,7 @@ impl<'a> Model<'a> {
     /// Fails if either index is out of range. Moving a sheet to its current
     /// position is a no-op.
     pub fn move_sheet(&mut self, sheet_index: u32, new_index: u32) -> Result<(), String> {
+        self.invalidate_dependency_index();
         let sheet_count = self.workbook.worksheets.len() as u32;
         if sheet_index >= sheet_count {
             return Err("Sheet index too large".to_string());
@@ -679,6 +685,9 @@ impl<'a> Model<'a> {
             last_lambda_id: 0,
             evaluation: crate::evaluation::Evaluation::default(),
             dependency_index: crate::dependency_index::DependencyIndex::default(),
+            incremental_recalculation: false,
+            pending_edits: Vec::new(),
+            last_evaluation_path: crate::model::EvaluationPath::Full,
             cf_cache: HashMap::new(),
             links: HashMap::new(),
         };

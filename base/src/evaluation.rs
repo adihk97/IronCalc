@@ -373,6 +373,8 @@ impl RestartLog {
 
 /// Everything the evaluation needs besides the workbook itself.
 pub(crate) struct Evaluation {
+    pub(crate) dirty: Option<HashSet<CellKey, KeyBuild>>,
+    pub(crate) formulas_evaluated: usize,
     /// The dynamic anchors, in the order in which they are evaluated. Kept
     /// across evaluations: the order the restarts arrived at stays, so the
     /// next evaluation needs no restart. New anchors are appended in natural
@@ -425,6 +427,10 @@ pub(crate) struct Evaluation {
     /// restart, the cells stay on `stack`, still `Evaluating`, to be run again
     /// from the top once the recursion has unwound.
     pub(crate) unwinding: bool,
+    /// Test-only injection point for proving that an abandoned incremental
+    /// pass is followed by a complete rebuild.
+    #[cfg(test)]
+    pub(crate) fail_incremental_pass_after_formula: bool,
 }
 
 /// How deep the recursion may go when nobody has said otherwise, in formulas
@@ -460,6 +466,8 @@ fn default_max_depth() -> usize {
 impl Default for Evaluation {
     fn default() -> Self {
         Evaluation {
+            dirty: None,
+            formulas_evaluated: 0,
             anchor_order: Vec::new(),
             cells: HashMap::default(),
             stack: Vec::new(),
@@ -476,6 +484,8 @@ impl Default for Evaluation {
             max_stack: DEFAULT_MAX_STACK,
             stack_base: 0,
             unwinding: false,
+            #[cfg(test)]
+            fail_incremental_pass_after_formula: false,
         }
     }
 }
@@ -509,6 +519,10 @@ struct Survey {
 }
 
 impl<'a> Model<'a> {
+    // Rectangle reads use a flat list for now. Above this many edges a point
+    // lookup can cost more than simply running the normal evaluator.
+    const MAX_INCREMENTAL_RECTANGLE_EDGES_PER_SHEET: usize = 1_000;
+
     /// Evaluates every formula in the workbook.
     ///
     /// Runs passes until one completes without a restart. `RestartLog` learns
@@ -517,6 +531,29 @@ impl<'a> Model<'a> {
     /// `#CIRC!` and keeps no spill cells: its stale cells are dropped when it
     /// is marked, so there is nothing of it to read or to contradict.
     pub fn evaluate(&mut self) {
+        self.evaluation.formulas_evaluated = 0;
+        if self.incremental_recalculation
+            && !self.pending_edits.is_empty()
+            && self.dependency_index.valid
+            && self.dependency_index.incomplete_count() == 0
+            && self.evaluation.anchor_order.is_empty()
+            && self.links.is_empty()
+            && self.evaluation.restart.is_none()
+            && !self.evaluation.unwinding
+            && self.try_incremental_evaluation()
+        {
+            self.last_evaluation_path = crate::model::EvaluationPath::Incremental;
+            self.pending_edits.clear();
+            return;
+        }
+        self.last_evaluation_path = crate::model::EvaluationPath::Full;
+        if self.dependency_index.enabled && !self.dependency_index.valid {
+            // A structural or direct-workbook mutation can leave records keyed
+            // by old positions. Preserve them until this full rebuild begins.
+            self.dependency_index.clear();
+            self.dependency_index.enable();
+        }
+        self.dependency_index.invalidate();
         let Survey {
             formulas,
             dynamic_anchors,
@@ -550,6 +587,111 @@ impl<'a> Model<'a> {
         }
         self.evaluation.restarts_in_last_evaluation = log.restarts;
         self.evaluate_conditional_formatting();
+        if self.dependency_index.enabled
+            && log.restarts == 0
+            && self.dependency_index.reads_len() == formulas.len()
+            && self.dependency_index.reads_are_complete()
+        {
+            self.dependency_index.valid = true;
+        } else {
+            self.dependency_index.invalidate();
+        }
+        self.pending_edits.clear();
+    }
+
+    /// Runs only formulas reachable from the cells edited since the last pass.
+    /// Any dynamic-pass signal is refused so the caller can use the full evaluator.
+    fn try_incremental_evaluation(&mut self) -> bool {
+        let mut dirty: HashSet<CellKey, KeyBuild> = HashSet::default();
+        let mut todo = self.pending_edits.clone();
+        let dirty_limit = self
+            .dependency_index
+            .reads_len()
+            .saturating_mul(10)
+            .saturating_div(100)
+            .max(1_000);
+        while let Some(cell) = todo.pop() {
+            let cell_key = key(cell);
+            if dirty.insert(cell_key) {
+                if dirty.len() > dirty_limit {
+                    return false;
+                }
+                // `readers` scans this list. Refuse before doing that work,
+                // rather than discovering a huge dirty set after the scan.
+                if self.dependency_index.rectangle_edges_in_sheet(cell.sheet)
+                    > Self::MAX_INCREMENTAL_RECTANGLE_EDGES_PER_SHEET
+                {
+                    return false;
+                }
+                // The edited formula itself must rerun. Constants have no record,
+                // but readers of either kind are found by the reverse index.
+                for dependent in self.dependency_index.readers(cell) {
+                    todo.push(CellReferenceIndex {
+                        sheet: dependent.0,
+                        row: dependent.1,
+                        column: dependent.2,
+                    });
+                }
+            }
+        }
+        if dirty.is_empty() {
+            self.evaluate_conditional_formatting();
+            return true;
+        }
+        // A panic caught by a caller must not leave partially replaced edges
+        // eligible for another incremental pass.
+        self.dependency_index.invalidate();
+        let state = &mut self.evaluation;
+        state.cells.clear();
+        state.stack.clear();
+        state.seen.clear();
+        state.seen_ranges.clear();
+        state.restart = None;
+        state.depth = 0;
+        state.unwinding = false;
+        state.circular.clear();
+        state.in_pass = true;
+        state.record_reads = false;
+        state.dirty = Some(dirty.clone());
+        self.clear_variable_stack();
+        self.clear_lambdas();
+        for formula in dirty {
+            self.evaluation.root = Some(CellReferenceIndex {
+                sheet: formula.0,
+                row: formula.1,
+                column: formula.2,
+            });
+            self.evaluate_cell(CellReferenceIndex {
+                sheet: formula.0,
+                row: formula.1,
+                column: formula.2,
+            });
+            #[cfg(test)]
+            if self.evaluation.fail_incremental_pass_after_formula {
+                self.evaluation.fail_incremental_pass_after_formula = false;
+                self.evaluation.unwinding = true;
+            }
+            if self.evaluation.restart.is_some() || self.evaluation.unwinding {
+                break;
+            }
+        }
+        self.evaluation.in_pass = false;
+        self.evaluation.root = None;
+        self.evaluation.dirty = None;
+        if self.evaluation.restart.is_some() || self.evaluation.unwinding {
+            self.dependency_index.invalidate();
+            return false;
+        }
+        // A formula can become incomplete while this incremental pass runs,
+        // notably when an edit introduces a cycle. Do not publish a partial
+        // pass as incremental; rebuild with the normal full evaluator.
+        if self.dependency_index.incomplete_count() != 0 {
+            self.dependency_index.invalidate();
+            return false;
+        }
+        self.evaluate_conditional_formatting();
+        self.dependency_index.valid = true;
+        true
     }
 
     /// Sets how many formulas deep the evaluation may recurse. A formula that
@@ -711,6 +853,7 @@ impl<'a> Model<'a> {
     ) -> Option<Restart> {
         let state = &mut self.evaluation;
         state.cells.clear();
+        state.dirty = None;
         state.stack.clear();
         state.seen.clear();
         state.seen_ranges.clear();
@@ -856,6 +999,11 @@ impl<'a> Model<'a> {
         cell: FormulaCell,
     ) -> CalcResult {
         let key = key(cell_reference);
+        if let Some(dirty) = &self.evaluation.dirty {
+            if !dirty.contains(&key) {
+                return self.stored_value(cell_reference);
+            }
+        }
         match self.evaluation.cells.get(&key) {
             Some(CellState::Evaluating) => {
                 self.mark_cycle(cell_reference);
@@ -940,11 +1088,17 @@ impl<'a> Model<'a> {
     /// cell stays on the stack, `Evaluating`: it has not been evaluated yet.
     /// A read that closes a loop through it is then still a cycle.
     fn run_top(&mut self, cell_reference: CellReferenceIndex, cell: FormulaCell) -> CalcResult {
+        self.evaluation.formulas_evaluated += 1;
         let key = key(cell_reference);
         // A frame belongs to this invocation, rather than the pass root. A
         // recursive formula has its own frame; its caller records only the
         // read of this cell before entering here.
         self.dependency_index.push();
+        // Fixed arrays also write other cells. Readers of those spill cells
+        // may have observed an already evaluated anchor and lack an edge to it.
+        if cell.array.is_some() {
+            self.dependency_index.mark_incomplete();
+        }
         // A formula can attach a link to its cell as it runs (HYPERLINK). A
         // run that was abandoned to an unwind may have attached one on the
         // strength of values it never really read; this run decides afresh.

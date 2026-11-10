@@ -320,6 +320,7 @@ impl<'a> UserModel<'a> {
         if old_value == name {
             return;
         }
+        self.model.invalidate_dependency_index();
         self.push_diff_list(vec![Diff::SetWorkbookName {
             old_value,
             new_value: name.to_string(),
@@ -332,6 +333,7 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::redo]
     pub fn undo(&mut self) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         if let Some(diff_list) = self.history.undo() {
             self.apply_undo_diff_list(&diff_list)?;
             self.send_queue.push(QueueDiffs {
@@ -347,6 +349,7 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::redo]
     pub fn redo(&mut self) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         if let Some(diff_list) = self.history.redo() {
             self.apply_diff_list(&diff_list)?;
             self.send_queue.push(QueueDiffs {
@@ -415,6 +418,7 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::flush_send_queue]
     pub fn apply_external_diffs(&mut self, diff_list_str: &[u8]) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         if let Ok(queue_diffs_list) = bitcode::decode::<Vec<QueueDiffs>>(diff_list_str) {
             for queue_diff in queue_diffs_list {
                 if matches!(queue_diff.r#type, DiffType::Redo) {
@@ -630,6 +634,7 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::delete_sheet]
     pub fn delete_sheet(&mut self, sheet: u32) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let worksheet = self.model.workbook.worksheet(sheet)?;
         let sheet_id = worksheet.sheet_id;
 
@@ -654,6 +659,7 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::rename_sheet_by_index]
     pub fn rename_sheet(&mut self, sheet: u32, new_name: &str) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let old_value = self.model.workbook.worksheet(sheet)?.name.clone();
         if old_value == new_name {
             return Ok(());
@@ -682,6 +688,7 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::move_sheet]
     pub fn move_sheet(&mut self, sheet_index: u32, new_index: u32) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let sheet_count = self.model.workbook.worksheets.len() as u32;
         if sheet_index >= sheet_count {
             return Err(format!("Invalid sheet index {sheet_index}"));
@@ -1070,6 +1077,7 @@ impl<'a> UserModel<'a> {
     ///
     /// See also [`Model::insert_rows`].
     pub fn insert_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
         self.model.insert_rows(sheet, row, row_count)?;
 
@@ -1102,6 +1110,7 @@ impl<'a> UserModel<'a> {
         column: i32,
         column_count: i32,
     ) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
         self.model.insert_columns(sheet, column, column_count)?;
 
@@ -1124,6 +1133,7 @@ impl<'a> UserModel<'a> {
     ///
     /// See also [`Model::delete_rows`].
     pub fn delete_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let worksheet = self.model.workbook.worksheet(sheet)?;
         let mut old_data = Vec::new();
         // Collect data for all rows to be deleted
@@ -1196,6 +1206,7 @@ impl<'a> UserModel<'a> {
         column: i32,
         column_count: i32,
     ) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let worksheet = self.model.workbook.worksheet(sheet)?;
         let mut old_data = Vec::new();
         // Collect data for all columns to be deleted
@@ -2134,6 +2145,7 @@ impl<'a> UserModel<'a> {
 
     /// Delete an existing defined name
     pub fn delete_defined_name(&mut self, name: &str, scope: Option<u32>) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let defined_name = self.model.get_defined_name(name, scope)?;
         let diff_list = vec![Diff::DeleteDefinedName {
             name: name.to_string(),
@@ -2151,6 +2163,7 @@ impl<'a> UserModel<'a> {
     /// Creates a new defined name. See [`DefinedNameEntry`] for the meaning
     /// of the fields.
     pub fn new_defined_name(&mut self, entry: DefinedNameEntry) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let DefinedNameEntry {
             name,
             scope,
@@ -2184,6 +2197,7 @@ impl<'a> UserModel<'a> {
         scope: Option<u32>,
         new: DefinedNameEntry,
     ) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         // Both formulas in the diff are stored internally (in English) so
         // undo/redo replays correctly regardless of the active language.
         let old_defined_name = self

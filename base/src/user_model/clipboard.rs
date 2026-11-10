@@ -192,6 +192,7 @@ impl<'a> UserModel<'a> {
         clipboard: &ClipboardData,
         is_cut: bool,
     ) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let mut diff_list = Vec::new();
         let view = self.get_selected_view();
         let (source_first_row, source_first_column, source_last_row, source_last_column) =
@@ -697,6 +698,7 @@ impl<'a> UserModel<'a> {
 
     /// Paste a csv-string into the model
     pub fn paste_csv_string(&mut self, area: &Area, csv: &str) -> Result<(), String> {
+        self.model.invalidate_dependency_index();
         let sheet = area.sheet;
 
         // First pass: parse all records so we know the full extent before touching any cells.

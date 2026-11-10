@@ -95,6 +95,7 @@ impl<'a> Model<'a> {
     /// * the range intersects an array formula
     /// * more than one cell of the range has content
     pub fn merge_cells(&mut self, range: &Area) -> Result<(), String> {
+        self.invalidate_dependency_index();
         let Area {
             sheet,
             row,
@@ -362,6 +363,7 @@ impl<'a> Model<'a> {
     /// Removes every merged cell that intersects `range`. The content of the
     /// anchors is kept. Removing no merged cells at all is not an error.
     pub fn unmerge_cells(&mut self, range: &Area) -> Result<(), String> {
+        self.invalidate_dependency_index();
         let Area {
             sheet,
             row,
